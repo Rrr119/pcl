@@ -237,6 +237,163 @@ TEST (PCL, OctreeDeCompressionShortDataVectors)
   EXPECT_EQ(decodeFrame<pcl::PointXYZRGBA>(makeCompressedFrame(true, true, {}, 0, 3, 0)), 8u);
 }
 
+TEST(PCL, OctreeCompressionLosslessXYZRGB)
+{
+  pcl::PointCloud<pcl::PointXYZRGB> cloud;
+  cloud.width = 3;
+  cloud.height = 2;
+  cloud.is_dense = false;
+  cloud.points = {
+      pcl::PointXYZRGB(1.0f, -2.0f, 3.0f, 10, 20, 30),
+      pcl::PointXYZRGB(9.0f, 8.0f, 7.0f, 40, 50, 60),
+      pcl::PointXYZRGB(-1.5f, 0.25f, 12.75f, 70, 80, 90),
+      pcl::PointXYZRGB(0.125f, -0.5f, 1.0f / 3.0f, 100, 110, 120),
+      pcl::PointXYZRGB(4.0f, 4.0f, 2.0f, 130, 140, 150),
+      pcl::PointXYZRGB(-8.0f, 6.0f, -3.0f, 160, 170, 180)};
+
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGB> encoder(
+      pcl::io::MANUAL_CONFIGURATION, false, 0.001, 0.01, false, 30, true, 8);
+  encoder.setLossless(true);
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGB> decoder;
+
+  std::stringstream compressed_data;
+  encoder.encodePointCloud(cloud.makeShared(), compressed_data);
+
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr decoded(new pcl::PointCloud<pcl::PointXYZRGB>);
+  decoder.decodePointCloud(compressed_data, decoded);
+
+  ASSERT_EQ(decoded->size(), cloud.size());
+  EXPECT_EQ(decoded->width, cloud.width);
+  EXPECT_EQ(decoded->height, cloud.height);
+  EXPECT_EQ(decoded->is_dense, cloud.is_dense);
+  for (std::size_t i = 0; i < cloud.size(); ++i)
+  {
+    EXPECT_EQ(decoded->points[i].x, cloud.points[i].x);
+    EXPECT_EQ(decoded->points[i].y, cloud.points[i].y);
+    EXPECT_EQ(decoded->points[i].z, cloud.points[i].z);
+    EXPECT_EQ(decoded->points[i].rgba, cloud.points[i].rgba);
+  }
+}
+
+TEST(PCL, OctreeCompressionLosslessNormalsAndColor)
+{
+  pcl::PointCloud<pcl::PointXYZRGBNormal> cloud;
+  cloud.width = 4;
+  cloud.height = 1;
+  cloud.is_dense = true;
+  cloud.points = {
+      pcl::PointXYZRGBNormal(1.0f, 2.0f, 3.0f, 11, 22, 33, 0.0f, 1.0f, 0.0f, 0.125f),
+      pcl::PointXYZRGBNormal(-1.0f, 0.5f, 7.0f, 44, 55, 66, 1.0f, 0.0f, 0.0f, 0.25f),
+      pcl::PointXYZRGBNormal(3.25f, -4.5f, 8.75f, 77, 88, 99, 0.0f, 0.0f, -1.0f, 0.5f),
+      pcl::PointXYZRGBNormal(0.0f, 0.0f, 0.0f, 111, 122, 133, 0.577350f, 0.577350f, 0.577350f, 0.75f)};
+
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> encoder(
+      pcl::io::MANUAL_CONFIGURATION, false, 0.001, 0.01, false, 30, true, 8);
+  encoder.setLossless(true);
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> decoder;
+
+  std::stringstream compressed_data;
+  encoder.encodePointCloud(cloud.makeShared(), compressed_data);
+
+  pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr decoded(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+  decoder.decodePointCloud(compressed_data, decoded);
+
+  ASSERT_EQ(decoded->size(), cloud.size());
+  for (std::size_t i = 0; i < cloud.size(); ++i)
+  {
+    EXPECT_EQ(decoded->points[i].x, cloud.points[i].x);
+    EXPECT_EQ(decoded->points[i].y, cloud.points[i].y);
+    EXPECT_EQ(decoded->points[i].z, cloud.points[i].z);
+    EXPECT_EQ(decoded->points[i].rgba, cloud.points[i].rgba);
+    EXPECT_EQ(decoded->points[i].normal_x, cloud.points[i].normal_x);
+    EXPECT_EQ(decoded->points[i].normal_y, cloud.points[i].normal_y);
+    EXPECT_EQ(decoded->points[i].normal_z, cloud.points[i].normal_z);
+    EXPECT_EQ(decoded->points[i].curvature, cloud.points[i].curvature);
+  }
+}
+
+TEST(PCL, OctreeCompressionLossyNormalsAndColor)
+{
+  pcl::PointCloud<pcl::PointXYZRGBNormal> cloud;
+  cloud.width = 3;
+  cloud.height = 1;
+  cloud.is_dense = true;
+  cloud.points = {
+      pcl::PointXYZRGBNormal(1.0f, 2.0f, 3.0f, 10, 20, 30, 1.0f, 0.0f, 0.0f, 0.1f),
+      pcl::PointXYZRGBNormal(1.002f, 2.001f, 3.003f, 40, 50, 60, 0.0f, 1.0f, 0.0f, 0.2f),
+      pcl::PointXYZRGBNormal(1.004f, 2.002f, 3.001f, 70, 80, 90, 0.0f, 0.0f, -1.0f, 0.3f)};
+
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> encoder(
+      pcl::io::MANUAL_CONFIGURATION, false, 0.001, 0.01, false, 30, true, 8);
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> decoder;
+
+  std::stringstream compressed_data;
+  encoder.encodePointCloud(cloud.makeShared(), compressed_data);
+
+  pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr decoded(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+  decoder.decodePointCloud(compressed_data, decoded);
+
+  ASSERT_EQ(decoded->size(), cloud.size());
+  for (std::size_t i = 0; i < cloud.size(); ++i)
+  {
+    EXPECT_NEAR(decoded->points[i].x, cloud.points[i].x, 0.002);
+    EXPECT_NEAR(decoded->points[i].y, cloud.points[i].y, 0.002);
+    EXPECT_NEAR(decoded->points[i].z, cloud.points[i].z, 0.002);
+    EXPECT_EQ(decoded->points[i].r, cloud.points[i].r);
+    EXPECT_EQ(decoded->points[i].g, cloud.points[i].g);
+    EXPECT_EQ(decoded->points[i].b, cloud.points[i].b);
+    EXPECT_EQ(decoded->points[i].normal_x, cloud.points[i].normal_x);
+    EXPECT_EQ(decoded->points[i].normal_y, cloud.points[i].normal_y);
+    EXPECT_EQ(decoded->points[i].normal_z, cloud.points[i].normal_z);
+  }
+}
+
+TEST(PCL, OctreeCompressionLosslessStream)
+{
+  auto make_stream_cloud = [](int color_offset) {
+    pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+    cloud->width = 4;
+    cloud->height = 1;
+    cloud->is_dense = true;
+    cloud->points = {
+        pcl::PointXYZRGBNormal(1.0f, 1.0f, 1.0f, color_offset + 1, 2, 3, 1.0f, 0.0f, 0.0f, 0.1f),
+        pcl::PointXYZRGBNormal(1.0f, 1.0f, 1.01f, color_offset + 4, 5, 6, 0.0f, 1.0f, 0.0f, 0.2f),
+        pcl::PointXYZRGBNormal(1.0f, 1.01f, 1.0f, color_offset + 7, 8, 9, 0.0f, 0.0f, 1.0f, 0.3f),
+        pcl::PointXYZRGBNormal(1.01f, 1.0f, 1.0f, color_offset + 10, 11, 12, -1.0f, 0.0f, 0.0f, 0.4f)};
+    return cloud;
+  };
+
+  auto first = make_stream_cloud(0);
+  auto second = make_stream_cloud(20);
+  second->points[2].normal_z = -1.0f;
+
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> encoder(
+      pcl::io::MANUAL_CONFIGURATION, false, 0.001, 0.01, false, 30, true, 8);
+  encoder.setLossless(true);
+  pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> decoder;
+
+  std::stringstream compressed_data;
+  encoder.encodePointCloud(first, compressed_data);
+  encoder.encodePointCloud(second, compressed_data);
+
+  pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr decoded(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+  decoder.decodePointCloud(compressed_data, decoded);
+  ASSERT_EQ(decoded->size(), first->size());
+  for (std::size_t i = 0; i < first->size(); ++i)
+    EXPECT_EQ(decoded->points[i].rgba, first->points[i].rgba);
+
+  pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr decoded_second(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+  decoder.decodePointCloud(compressed_data, decoded_second);
+  ASSERT_EQ(decoded_second->size(), second->size());
+  for (std::size_t i = 0; i < second->size(); ++i)
+  {
+    EXPECT_EQ(decoded_second->points[i].rgba, second->points[i].rgba);
+    EXPECT_EQ(decoded_second->points[i].normal_x, second->points[i].normal_x);
+    EXPECT_EQ(decoded_second->points[i].normal_y, second->points[i].normal_y);
+    EXPECT_EQ(decoded_second->points[i].normal_z, second->points[i].normal_z);
+  }
+}
+
 TEST(PCL, OctreeDeCompressionFile)
 {
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr input_cloud_ptr (new pcl::PointCloud<pcl::PointXYZRGB>);

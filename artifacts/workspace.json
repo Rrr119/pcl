@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid22500",
+  "B": "/home/dev/feedback/uid22500",
+  "sha": "fd39f32af932d50e033dba17b29e6d5fa4f64255",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "PointCloudLibrary",
+    "repo": "pcl",
+    "sha": "fd39f32af932d50e033dba17b29e6d5fa4f64255"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "pcl",
+    "cloneUrl": "https://github.com/Rrr119/pcl.git"
+  },
+  "at": "2026-11-16T16:45:33.503Z"
+}

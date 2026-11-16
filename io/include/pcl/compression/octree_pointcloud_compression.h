@@ -37,6 +37,7 @@
 
 #pragma once
 
+#include <pcl/PCLPointField.h>
 #include <pcl/octree/octree2buf_base.h>
 #include <pcl/octree/octree_pointcloud.h>
 #include "entropy_range_coder.h"
@@ -55,7 +56,9 @@ namespace pcl
   namespace io
   {
     /** \brief @b Octree pointcloud compression class
-     *  \note This class enables compression and decompression of point cloud data based on octree data structures. It is a lossy compression. See also `PCDWriter` for another way to compress point cloud data.
+     *  \note This class enables compression and decompression of point cloud data based on octree data structures.
+     *  XYZ and color coding are lossy by default. Normals can be encoded as well, and lossless mode preserves all
+     *  point fields. See also `PCDWriter` for another way to compress point cloud data.
      *  \note
      *  \note typename: PointT: type of point used in pointcloud
      *  \author Julius Kammerl (julius@kammerl.de)
@@ -81,6 +84,13 @@ namespace pcl
 
         using RealTimeStreamCompression = OctreePointCloudCompression<PointT, LeafT, BranchT, Octree2BufBase<LeafT, BranchT> >;
         using SinglePointCloudCompressionLowMemory = OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeBase<LeafT, BranchT> >;
+
+        /** \brief Compression mode. */
+        enum class CompressionMode
+        {
+          LOSSY,
+          LOSSLESS
+        };
 
 
         /** \brief Constructor
@@ -181,6 +191,91 @@ namespace pcl
           return (output_);
         }
 
+        /** \brief Enable or disable lossless point attribute encoding.
+          * \param[in] lossless_arg true for lossless XYZ, color, normal and other point field encoding
+          * \note Lossless mode disables voxel-grid downsampling. It is intended for single clouds or inter-frame
+          * streams whose complete point attributes must be preserved.
+          */
+        void
+        setLossless (bool lossless_arg)
+        {
+          lossless_ = lossless_arg;
+          i_frame_ = true;
+        }
+
+        /** \brief Alias for setLossless(). */
+        void
+        setLosslessMode (bool lossless_arg)
+        {
+          setLossless (lossless_arg);
+        }
+
+        /** \brief Select lossy or lossless compression. */
+        void
+        setCompressionMode (CompressionMode mode_arg)
+        {
+          lossless_ = (mode_arg == CompressionMode::LOSSLESS);
+          i_frame_ = true;
+        }
+
+        /** \brief Check whether lossless compression is enabled. */
+        bool
+        isLossless () const
+        {
+          return (lossless_);
+        }
+
+        /** \brief Get the selected compression mode. */
+        CompressionMode
+        getCompressionMode () const
+        {
+          return (lossless_ ? CompressionMode::LOSSLESS : CompressionMode::LOSSY);
+        }
+
+        /** \brief Enable or disable normal encoding for point types with normal_x, normal_y and normal_z fields. */
+        void
+        setNormalEncodingEnabled (bool enabled_arg)
+        {
+          do_normal_encoding_ = enabled_arg;
+          i_frame_ = true;
+        }
+
+        /** \brief Alias for setNormalEncodingEnabled(). */
+        void
+        setNormalEncoding (bool enabled_arg)
+        {
+          setNormalEncodingEnabled (enabled_arg);
+        }
+
+        /** \brief Check whether normal encoding is enabled. */
+        bool
+        isNormalEncodingEnabled () const
+        {
+          return (do_normal_encoding_);
+        }
+
+        /** \brief Enable or disable color encoding for point types with rgb or rgba fields. */
+        void
+        setColorEncodingEnabled (bool enabled_arg)
+        {
+          do_color_encoding_ = enabled_arg;
+          i_frame_ = true;
+        }
+
+        /** \brief Alias for setColorEncodingEnabled(). */
+        void
+        setColorEncoding (bool enabled_arg)
+        {
+          setColorEncodingEnabled (enabled_arg);
+        }
+
+        /** \brief Check whether color encoding is enabled. */
+        bool
+        isColorEncodingEnabled () const
+        {
+          return (do_color_encoding_);
+        }
+
         /** \brief Encode point cloud to output stream
           * \param cloud_arg:  point cloud to be compressed
           * \param compressed_tree_data_out_arg:  binary output stream containing compressed data
@@ -212,8 +307,9 @@ namespace pcl
 
         /** \brief Synchronize to frame header
           * \param compressed_tree_data_in_arg: binary input stream
+          * \return true if a supported frame header was found
           */
-        void
+        bool
         syncToHeader (std::istream& compressed_tree_data_in_arg);
 
         /** \brief Apply entropy encoding to encoded information and output to binary stream
@@ -242,6 +338,30 @@ namespace pcl
         void
         deserializeTreeCallback (LeafT&, const OctreeKey& key_arg) override;
 
+        /** \brief Detect color, normal and generic point fields. */
+        void
+        analyzePointFields ();
+
+        /** \brief Append all point fields to the lossless attribute stream. */
+        void
+        encodeLosslessPoint (const PointT& point_arg);
+
+        /** \brief Restore all point fields from the lossless attribute stream. */
+        bool
+        decodeLosslessPoint (PointT& point_arg);
+
+        /** \brief Append the three normal components of a point. */
+        void
+        encodeNormal (const PointT& point_arg);
+
+        /** \brief Read and assign the three normal components of a point. */
+        bool
+        decodeNormal (PointT& point_arg);
+
+        /** \brief Restore the original input point order after lossless decoding. */
+        void
+        restoreOriginalPointOrder ();
+
 
         /** \brief Pointer to output point cloud dataset. */
         PointCloudPtr output_;
@@ -252,8 +372,23 @@ namespace pcl
         /** \brief Vector for storing points per voxel information  */
         std::vector<unsigned int> point_count_data_vector_;
 
+        /** \brief Vector for storing original point indices in lossless mode */
+        std::vector<unsigned int> point_index_data_vector_;
+
         /** \brief Iterator on points per voxel vector */
         std::vector<unsigned int>::const_iterator point_count_data_vector_iterator_;
+
+        /** \brief Exact point field bytes used by lossless encoding */
+        std::vector<char> lossless_point_data_vector_;
+
+        /** \brief Read position in the lossless point field vector */
+        std::size_t lossless_point_data_position_{0};
+
+        /** \brief Normal data used during lossy encoding */
+        std::vector<char> normal_data_vector_;
+
+        /** \brief Read position in the normal data vector */
+        std::size_t normal_data_position_{0};
 
         /** \brief Color coding instance */
         ColorCoding<PointT> color_coder_;
@@ -272,17 +407,34 @@ namespace pcl
         bool i_frame_{true};
 
         bool do_color_encoding_{false};
+        bool do_normal_encoding_{true};
         bool cloud_with_color_{false};
+        bool cloud_with_normals_{false};
         bool data_with_color_{false};
+        bool data_with_normals_{false};
+        bool lossless_{false};
+        bool data_lossless_{false};
+        bool v2_frame_{false};
         unsigned char point_color_offset_{0};
+        unsigned char normal_offsets_[3]{0, 0, 0};
+        unsigned char normal_field_size_{0};
+
+        std::vector<pcl::PCLPointField> point_fields_;
+        std::size_t lossless_point_record_size_{0};
+
+        std::uint32_t source_width_{0};
+        std::uint32_t source_height_{0};
+        bool source_is_dense_{true};
 
         //bool activating statistics
         bool b_show_statistics_{false};
         std::uint64_t compressed_point_data_len_{0};
         std::uint64_t compressed_color_data_len_{0};
+        std::uint64_t compressed_normal_data_len_{0};
 
         // frame header identifier
         static const char* frame_header_identifier_;
+        static const char* frame_header_identifier_v2_;
 
         const compression_Profiles_e selected_profile_;
         const double point_resolution_;
@@ -296,6 +448,9 @@ namespace pcl
     // define frame identifier
     template<typename PointT, typename LeafT, typename BranchT, typename OctreeT>
       const char* OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::frame_header_identifier_ = "<PCL-OCT-COMPRESSED>";
+
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT>
+      const char* OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::frame_header_identifier_v2_ = "<PCL-OCT-COMPRESSED2>";
   }
 
 }

@@ -167,6 +167,51 @@ The following compression profiles are available:
 	- **MANUAL_CONFIGURATION** enables manual configuration for advanced parametrization
  
 
+Color, normals and lossless compression
+--------------------------------------------------------
+
+The octree compression stream stores RGB/RGBA color when the point type provides a
+``rgb`` or ``rgba`` field. Point types with ``normal_x``, ``normal_y`` and
+``normal_z`` fields are detected automatically and their normals are transmitted as
+well. Color and normal coding can be disabled independently:
+
+.. code-block:: cpp
+
+        pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal> encoder(
+            pcl::io::MANUAL_CONFIGURATION, false,
+            0.001,  /* point resolution */
+            0.01,   /* octree resolution */
+            false,  /* voxel-grid downsampling */
+            30,     /* i-frame rate */
+            true,   /* encode color */
+            8       /* color bits per component */);
+
+        encoder.setColorEncodingEnabled (true);
+        encoder.setNormalEncodingEnabled (true);
+
+The default mode is lossy: the octree quantizes XYZ coordinates, voxel-grid
+downsampling may replace points by voxel centers, and color components can be
+reduced to ``colorBitResolution`` bits. Normals are preserved with their full
+floating-point precision in lossy mode.
+
+For transmission or storage where every point attribute must be reproduced exactly,
+enable lossless mode before encoding:
+
+.. code-block:: cpp
+
+        encoder.setLossless (true);
+        // Equivalent: encoder.setCompressionMode(
+        //     pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal>::CompressionMode::LOSSLESS);
+
+Lossless mode disables voxel-grid downsampling and preserves all point fields
+(including color, normals and curvature), the original point order, cloud
+``width``/``height`` and the ``is_dense`` flag. It uses the same octree stream and
+entropy coder as the default mode. Streams containing normals or lossless data use
+the versioned octree frame format; decoders can still read the original format.
+The decoder adopts the mode and field configuration from the stream, so it does
+not need to be configured before calling ``decodePointCloud``.
+
+
 Advanced parametrization:
 --------------------------------------------------------	
 
@@ -205,6 +250,29 @@ The advanced parametrization is explained in the following:
 	- **doColorEncoding_arg**: This option enables color component encoding.   	 
 	
 	- **colorBitResolution_arg**: This parameter defines the amount of bits per color component to be encoded. 
+
+
+Tests and benchmarks
+--------------------------------------------------------
+
+The compression unit tests cover legacy frame decoding, color, normals and lossless
+round-trips:
+
+.. code-block:: bash
+
+        cmake -S . -B build -DBUILD_global_tests=ON
+        cmake --build build --target test_io_octree_compression
+        ./build/test/io/test_octree_compression
+
+An octree compression benchmark measures lossy and lossless encoding and decoding
+for point clouds with color and normals:
+
+.. code-block:: bash
+
+        cmake -S . -B build -DBUILD_benchmarks=ON
+        cmake --build build --target benchmark_io_octree_compression
+        ./build/benchmarks/benchmark_io_octree_compression \
+            --benchmark_filter=OctreeCompression
 
 Command line tool for PCL point cloud stream compression
 --------------------------------------------------------

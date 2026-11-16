@@ -41,6 +41,8 @@
 #include <pcl/common/io.h> // for getFieldIndex
 #include <pcl/compression/entropy_range_coder.h>
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <vector>
 #include <cstring>
@@ -67,24 +69,23 @@ namespace pcl
       // make sure cloud contains points
       if (this->leaf_count_>0) {
 
-
-        // color field analysis
-        cloud_with_color_ = false;
-        std::vector<pcl::PCLPointField> fields;
-        int rgba_index = -1;
-        rgba_index = pcl::getFieldIndex<PointT> ("rgb", fields);
-        if (rgba_index == -1)
-        {
-          rgba_index = pcl::getFieldIndex<PointT> ("rgba", fields);
-        }
-        if (rgba_index >= 0)
-        {
-          point_color_offset_ = static_cast<unsigned char> (fields[rgba_index].offset);
-          cloud_with_color_ = true;
-        }
-
-        // apply encoding configuration
+        // analyze available point attributes and apply encoding configuration
+        analyzePointFields ();
         cloud_with_color_ &= do_color_encoding_;
+        cloud_with_normals_ &= do_normal_encoding_;
+
+        // lossless coding requires the original point attributes, so no voxel can be dropped
+        if (lossless_)
+          do_voxel_grid_enDecoding_ = false;
+
+        data_with_color_ = cloud_with_color_;
+        data_with_normals_ = cloud_with_normals_;
+        data_lossless_ = lossless_;
+        v2_frame_ = data_lossless_ || data_with_normals_;
+
+        source_width_ = cloud_arg->width;
+        source_height_ = cloud_arg->height;
+        source_is_dense_ = cloud_arg->is_dense;
 
 
         // if octree depth changed, we enforce I-frame encoding
@@ -105,6 +106,20 @@ namespace pcl
         {
           point_count_data_vector_.clear ();
           point_count_data_vector_.reserve (cloud_arg->size ());
+        }
+        point_index_data_vector_.clear ();
+        lossless_point_data_vector_.clear ();
+        normal_data_vector_.clear ();
+        if (data_lossless_)
+        {
+          point_count_data_vector_.clear ();
+          point_count_data_vector_.reserve (cloud_arg->size ());
+          point_index_data_vector_.reserve (cloud_arg->size ());
+          lossless_point_data_vector_.reserve (cloud_arg->size () * lossless_point_record_size_);
+        }
+        else if (data_with_normals_)
+        {
+          normal_data_vector_.reserve (cloud_arg->size () * 3 * sizeof (float));
         }
 
         // initialize color encoding
@@ -141,6 +156,7 @@ namespace pcl
         {
           float bytes_per_XYZ = static_cast<float> (compressed_point_data_len_) / static_cast<float> (point_count_);
           float bytes_per_color = static_cast<float> (compressed_color_data_len_) / static_cast<float> (point_count_);
+          float bytes_per_normal = static_cast<float> (compressed_normal_data_len_) / static_cast<float> (point_count_);
 
           PCL_INFO ("*** POINTCLOUD ENCODING ***\n");
           PCL_INFO ("Frame ID: %d\n", frame_ID_);
@@ -153,11 +169,16 @@ namespace pcl
           PCL_INFO ("XYZ bytes per point: %f bytes\n", bytes_per_XYZ);
           PCL_INFO ("Color compression percentage: %f%%\n", bytes_per_color / (sizeof (int)) * 100.0f);
           PCL_INFO ("Color bytes per point: %f bytes\n", bytes_per_color);
+          if (data_with_normals_)
+          {
+            PCL_INFO ("Normal compression percentage: %f%%\n", bytes_per_normal / (3.0f * sizeof (float)) * 100.0f);
+            PCL_INFO ("Normal bytes per point: %f bytes\n", bytes_per_normal);
+          }
           PCL_INFO ("Size of uncompressed point cloud: %f kBytes\n", static_cast<float> (point_count_) * (sizeof (int) + 3.0f * sizeof (float)) / 1024.0f);
-          PCL_INFO ("Size of compressed point cloud: %f kBytes\n", static_cast<float> (compressed_point_data_len_ + compressed_color_data_len_) / 1024.0f);
-          PCL_INFO ("Total bytes per point: %f bytes\n", bytes_per_XYZ + bytes_per_color);
-          PCL_INFO ("Total compression percentage: %f%%\n", (bytes_per_XYZ + bytes_per_color) / (sizeof (int) + 3.0f * sizeof (float)) * 100.0f);
-          PCL_INFO ("Compression ratio: %f\n\n", static_cast<float> (sizeof (int) + 3.0f * sizeof (float)) / static_cast<float> (bytes_per_XYZ + bytes_per_color));
+          PCL_INFO ("Size of compressed point cloud: %f kBytes\n", static_cast<float> (compressed_point_data_len_ + compressed_color_data_len_ + compressed_normal_data_len_) / 1024.0f);
+          PCL_INFO ("Total bytes per point: %f bytes\n", bytes_per_XYZ + bytes_per_color + bytes_per_normal);
+          PCL_INFO ("Total compression percentage: %f%%\n", (bytes_per_XYZ + bytes_per_color + bytes_per_normal) / (sizeof (int) + 3.0f * sizeof (float)) * 100.0f);
+          PCL_INFO ("Compression ratio: %f\n\n", static_cast<float> (sizeof (int) + 3.0f * sizeof (float)) / static_cast<float> (bytes_per_XYZ + bytes_per_color + bytes_per_normal));
         }
         
         i_frame_ = false;
@@ -178,24 +199,15 @@ namespace pcl
     {
 
       // synchronize to frame header
-      syncToHeader(compressed_tree_data_in_arg);
+      if (!syncToHeader(compressed_tree_data_in_arg))
+        return;
 
       // initialize octree
       this->switchBuffers ();
       this->setOutputCloud (cloud_arg);
 
-      // color field analysis
-      cloud_with_color_ = false;
-      std::vector<pcl::PCLPointField> fields;
-      int rgba_index = -1;
-      rgba_index = pcl::getFieldIndex<PointT> ("rgb", fields);
-      if (rgba_index == -1)
-        rgba_index = pcl::getFieldIndex<PointT> ("rgba", fields);
-      if (rgba_index >= 0)
-      {
-        point_color_offset_ = static_cast<unsigned char> (fields[rgba_index].offset);
-        cloud_with_color_ = true;
-      }
+      // analyze the point fields available to the decoder
+      analyzePointFields ();
 
       // read header from input stream
       this->readFrameHeader (compressed_tree_data_in_arg);
@@ -219,14 +231,25 @@ namespace pcl
         this->deserializeTree (binary_tree_data_vector_, true);
 
       // assign point cloud properties
-      output_->height = 1;
-      output_->width = cloud_arg->size ();
-      output_->is_dense = false;
+      if (data_lossless_)
+      {
+        restoreOriginalPointOrder ();
+        output_->width = source_width_;
+        output_->height = source_height_;
+        output_->is_dense = source_is_dense_;
+      }
+      else
+      {
+        output_->height = 1;
+        output_->width = cloud_arg->size ();
+        output_->is_dense = false;
+      }
 
       if (b_show_statistics_)
       {
         float bytes_per_XYZ = static_cast<float> (compressed_point_data_len_) / static_cast<float> (point_count_);
         float bytes_per_color = static_cast<float> (compressed_color_data_len_) / static_cast<float> (point_count_);
+        float bytes_per_normal = static_cast<float> (compressed_normal_data_len_) / static_cast<float> (point_count_);
 
         PCL_INFO ("*** POINTCLOUD DECODING ***\n");
         PCL_INFO ("Frame ID: %d\n", frame_ID_);
@@ -239,11 +262,16 @@ namespace pcl
         PCL_INFO ("XYZ bytes per point: %f bytes\n", bytes_per_XYZ);
         PCL_INFO ("Color compression percentage: %f%%\n", bytes_per_color / (sizeof (int)) * 100.0f);
         PCL_INFO ("Color bytes per point: %f bytes\n", bytes_per_color);
+        if (data_with_normals_)
+        {
+          PCL_INFO ("Normal compression percentage: %f%%\n", bytes_per_normal / (3.0f * sizeof (float)) * 100.0f);
+          PCL_INFO ("Normal bytes per point: %f bytes\n", bytes_per_normal);
+        }
         PCL_INFO ("Size of uncompressed point cloud: %f kBytes\n", static_cast<float> (point_count_) * (sizeof (int) + 3.0f * sizeof (float)) / 1024.0f);
-        PCL_INFO ("Size of compressed point cloud: %f kBytes\n", static_cast<float> (compressed_point_data_len_ + compressed_color_data_len_) / 1024.0f);
-        PCL_INFO ("Total bytes per point: %f bytes\n", bytes_per_XYZ + bytes_per_color);
-        PCL_INFO ("Total compression percentage: %f%%\n", (bytes_per_XYZ + bytes_per_color) / (sizeof (int) + 3.0f * sizeof (float)) * 100.0f);
-        PCL_INFO ("Compression ratio: %f\n\n", static_cast<float> (sizeof (int) + 3.0f * sizeof (float)) / static_cast<float> (bytes_per_XYZ + bytes_per_color));
+        PCL_INFO ("Size of compressed point cloud: %f kBytes\n", static_cast<float> (compressed_point_data_len_ + compressed_color_data_len_ + compressed_normal_data_len_) / 1024.0f);
+        PCL_INFO ("Total bytes per point: %f bytes\n", bytes_per_XYZ + bytes_per_color + bytes_per_normal);
+        PCL_INFO ("Total compression percentage: %f%%\n", (bytes_per_XYZ + bytes_per_color + bytes_per_normal) / (sizeof (int) + 3.0f * sizeof (float)) * 100.0f);
+        PCL_INFO ("Compression ratio: %f\n\n", static_cast<float> (sizeof (int) + 3.0f * sizeof (float)) / static_cast<float> (bytes_per_XYZ + bytes_per_color + bytes_per_normal));
       }
     }
 
@@ -256,6 +284,7 @@ namespace pcl
 
       compressed_point_data_len_ = 0;
       compressed_color_data_len_ = 0;
+      compressed_normal_data_len_ = 0;
 
       // encode binary octree structure
       binary_tree_data_vector_size = binary_tree_data_vector_.size ();
@@ -274,7 +303,36 @@ namespace pcl
                                                                                compressed_tree_data_out_arg);
       }
 
-      if (!do_voxel_grid_enDecoding_)
+      if (data_with_normals_ && !data_lossless_)
+      {
+        std::uint64_t normal_data_vector_size = normal_data_vector_.size ();
+        compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&normal_data_vector_size),
+                                            sizeof (normal_data_vector_size));
+        compressed_normal_data_len_ += entropy_coder_.encodeCharVectorToStream (normal_data_vector_,
+                                                                                 compressed_tree_data_out_arg);
+      }
+
+      if (data_lossless_)
+      {
+        std::uint64_t point_count_data_vector_size = point_count_data_vector_.size ();
+        compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&point_count_data_vector_size),
+                                            sizeof (point_count_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.encodeIntVectorToStream (point_count_data_vector_,
+                                                                              compressed_tree_data_out_arg);
+
+        std::uint64_t lossless_point_data_vector_size = lossless_point_data_vector_.size ();
+        compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&lossless_point_data_vector_size),
+                                            sizeof (lossless_point_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.encodeCharVectorToStream (lossless_point_data_vector_,
+                                                                               compressed_tree_data_out_arg);
+
+        std::uint64_t point_index_data_vector_size = point_index_data_vector_.size ();
+        compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&point_index_data_vector_size),
+                                            sizeof (point_index_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.encodeIntVectorToStream (point_index_data_vector_,
+                                                                              compressed_tree_data_out_arg);
+      }
+      else if (!do_voxel_grid_enDecoding_)
       {
         std::uint64_t pointCountDataVector_size;
         std::uint64_t point_diff_data_vector_size;
@@ -316,6 +374,9 @@ namespace pcl
 
       compressed_point_data_len_ = 0;
       compressed_color_data_len_ = 0;
+      compressed_normal_data_len_ = 0;
+      normal_data_position_ = 0;
+      lossless_point_data_position_ = 0;
 
       // decode binary octree structure
       compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&binary_tree_data_vector_size), sizeof (binary_tree_data_vector_size));
@@ -333,7 +394,45 @@ namespace pcl
                                                                            point_avg_color_data_vector);
       }
 
-      if (!do_voxel_grid_enDecoding_)
+      if (data_with_normals_ && !data_lossless_)
+      {
+        std::uint64_t normal_data_vector_size;
+        compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&normal_data_vector_size),
+                                          sizeof (normal_data_vector_size));
+        normal_data_vector_.resize (static_cast<std::size_t> (normal_data_vector_size));
+        compressed_normal_data_len_ += entropy_coder_.decodeStreamToCharVector (compressed_tree_data_in_arg,
+                                                                                normal_data_vector_);
+      }
+      else
+      {
+        normal_data_vector_.clear ();
+      }
+
+      if (data_lossless_)
+      {
+        std::uint64_t point_count_data_vector_size;
+        compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&point_count_data_vector_size),
+                                          sizeof (point_count_data_vector_size));
+        point_count_data_vector_.resize (static_cast<std::size_t> (point_count_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.decodeStreamToIntVector (compressed_tree_data_in_arg,
+                                                                               point_count_data_vector_);
+        point_count_data_vector_iterator_ = point_count_data_vector_.begin ();
+
+        std::uint64_t lossless_point_data_vector_size;
+        compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&lossless_point_data_vector_size),
+                                          sizeof (lossless_point_data_vector_size));
+        lossless_point_data_vector_.resize (static_cast<std::size_t> (lossless_point_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.decodeStreamToCharVector (compressed_tree_data_in_arg,
+                                                                                lossless_point_data_vector_);
+
+        std::uint64_t point_index_data_vector_size;
+        compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&point_index_data_vector_size),
+                                          sizeof (point_index_data_vector_size));
+        point_index_data_vector_.resize (static_cast<std::size_t> (point_index_data_vector_size));
+        compressed_point_data_len_ += entropy_coder_.decodeStreamToIntVector (compressed_tree_data_in_arg,
+                                                                               point_index_data_vector_);
+      }
+      else if (!do_voxel_grid_enDecoding_)
       {
         std::uint64_t point_count_data_vector_size;
         std::uint64_t point_diff_data_vector_size;
@@ -368,8 +467,10 @@ namespace pcl
     template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
     OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::writeFrameHeader (std::ostream& compressed_tree_data_out_arg)
     {
+      const char* frame_identifier = v2_frame_ ? frame_header_identifier_v2_ : frame_header_identifier_;
+
       // encode header identifier
-      compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (frame_header_identifier_), strlen (frame_header_identifier_));
+      compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (frame_identifier), strlen (frame_identifier));
       // encode point cloud header id
       compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&frame_ID_), sizeof (frame_ID_));
       // encode frame type (I/P-frame)
@@ -395,11 +496,28 @@ namespace pcl
 
         // encode coding configuration
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&do_voxel_grid_enDecoding_), sizeof (do_voxel_grid_enDecoding_));
-        compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&cloud_with_color_), sizeof (cloud_with_color_));
+        if (v2_frame_)
+        {
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&data_lossless_), sizeof (data_lossless_));
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&data_with_color_), sizeof (data_with_color_));
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&data_with_normals_), sizeof (data_with_normals_));
+        }
+        else
+        {
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&cloud_with_color_), sizeof (cloud_with_color_));
+        }
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&point_count_), sizeof (point_count_));
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&octree_resolution), sizeof (octree_resolution));
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&color_bit_depth), sizeof (color_bit_depth));
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&point_resolution), sizeof (point_resolution));
+        if (v2_frame_)
+        {
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&source_width_), sizeof (source_width_));
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&source_height_), sizeof (source_height_));
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&source_is_dense_), sizeof (source_is_dense_));
+          const auto record_size = static_cast<std::uint64_t> (lossless_point_record_size_);
+          compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&record_size), sizeof (record_size));
+        }
 
         // encode octree bounding box
         compressed_tree_data_out_arg.write (reinterpret_cast<const char*> (&min_x), sizeof (min_x));
@@ -412,18 +530,36 @@ namespace pcl
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////
-    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> bool
     OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::syncToHeader ( std::istream& compressed_tree_data_in_arg)
     {
-      // sync to frame header
-      unsigned int header_id_pos = 0;
-      while (header_id_pos < strlen (frame_header_identifier_))
+      const std::string v1_identifier (frame_header_identifier_);
+      const std::string v2_identifier (frame_header_identifier_v2_);
+      const std::size_t max_identifier_size = std::max (v1_identifier.size (), v2_identifier.size ());
+
+      std::string window;
+      window.reserve (max_identifier_size);
+      char read_char;
+      while (compressed_tree_data_in_arg.get (read_char))
       {
-        char readChar;
-        compressed_tree_data_in_arg.read (static_cast<char*> (&readChar), sizeof (readChar));
-        if (readChar != frame_header_identifier_[header_id_pos++])
-          header_id_pos = (frame_header_identifier_[0]==readChar)?1:0;
+        window.push_back (read_char);
+        if (window.size () > max_identifier_size)
+          window.erase (window.begin ());
+
+        if (window == v2_identifier)
+        {
+          v2_frame_ = true;
+          return true;
+        }
+        if (window == v1_identifier)
+        {
+          v2_frame_ = false;
+          return true;
+        }
       }
+
+      PCL_ERROR ("[pcl::io::OctreePointCloudCompression::syncToHeader] Could not find a frame header.\n");
+      return false;
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -442,11 +578,36 @@ namespace pcl
 
         // read coder configuration
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&do_voxel_grid_enDecoding_), sizeof (do_voxel_grid_enDecoding_));
-        compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&data_with_color_), sizeof (data_with_color_));
+        if (v2_frame_)
+        {
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&data_lossless_), sizeof (data_lossless_));
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&data_with_color_), sizeof (data_with_color_));
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&data_with_normals_), sizeof (data_with_normals_));
+        }
+        else
+        {
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&data_with_color_), sizeof (data_with_color_));
+          data_with_normals_ = false;
+          data_lossless_ = false;
+        }
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&point_count_), sizeof (point_count_));
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&octree_resolution), sizeof (octree_resolution));
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&color_bit_depth), sizeof (color_bit_depth));
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&point_resolution), sizeof (point_resolution));
+        if (v2_frame_)
+        {
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&source_width_), sizeof (source_width_));
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&source_height_), sizeof (source_height_));
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&source_is_dense_), sizeof (source_is_dense_));
+
+          std::uint64_t encoded_record_size;
+          compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&encoded_record_size), sizeof (encoded_record_size));
+          if (data_lossless_ && encoded_record_size != lossless_point_record_size_)
+          {
+            PCL_WARN ("[pcl::io::OctreePointCloudCompression::readFrameHeader] Lossless point record size mismatch (stream: %zu, decoder: %zu).\n",
+                      static_cast<std::size_t> (encoded_record_size), lossless_point_record_size_);
+          }
+        }
 
         // read octree bounding box
         compressed_tree_data_in_arg.read (reinterpret_cast<char*> (&min_x), sizeof (min_x));
@@ -475,6 +636,17 @@ namespace pcl
       // reference to point indices vector stored within octree leaf
       const auto& leafIdx = leaf_arg.getPointIndicesVector();
 
+      if (data_lossless_)
+      {
+        point_count_data_vector_.push_back (static_cast<unsigned int> (leafIdx.size ()));
+        for (const auto& idx : leafIdx)
+        {
+          point_index_data_vector_.push_back (static_cast<unsigned int> (idx));
+          encodeLosslessPoint ((*this->input_)[idx]);
+        }
+        return;
+      }
+
       if (!do_voxel_grid_enDecoding_)
       {
         double lowerVoxelCorner[3];
@@ -493,12 +665,45 @@ namespace pcl
         if (cloud_with_color_)
           // encode color of points
           color_coder_.encodePoints (leafIdx, point_color_offset_, this->input_);
+
+        if (cloud_with_normals_)
+        {
+          for (const auto& idx : leafIdx)
+            encodeNormal ((*this->input_)[idx]);
+        }
       }
       else
       {
         if (cloud_with_color_)
           // encode average color of all points within voxel
           color_coder_.encodeAverageOfPoints (leafIdx, point_color_offset_, this->input_);
+
+        if (cloud_with_normals_)
+        {
+          float average_normal[3] = {0.0f, 0.0f, 0.0f};
+          for (const auto& idx : leafIdx)
+          {
+            const char* point_data = reinterpret_cast<const char*> (&(*this->input_)[idx]);
+            for (int component = 0; component < 3; ++component)
+            {
+              float value;
+              std::memcpy (&value, point_data + normal_offsets_[component], sizeof (value));
+              average_normal[component] += value;
+            }
+          }
+
+          const float normal_length = std::sqrt (average_normal[0] * average_normal[0] +
+                                                 average_normal[1] * average_normal[1] +
+                                                 average_normal[2] * average_normal[2]);
+          if (normal_length > 1e-12f)
+          {
+            for (float& value : average_normal)
+              value /= normal_length;
+          }
+          normal_data_vector_.insert (normal_data_vector_.end (),
+                                      reinterpret_cast<const char*> (average_normal),
+                                      reinterpret_cast<const char*> (average_normal) + sizeof (average_normal));
+        }
       }
     }
 
@@ -510,6 +715,25 @@ namespace pcl
       PointT newPoint;
 
       std::size_t pointCount = 1;
+
+      if (data_lossless_)
+      {
+        if (point_count_data_vector_iterator_ == point_count_data_vector_.end ())
+        {
+          PCL_WARN ("[pcl::io::OctreePointCloudCompression::deserializeTreeCallback] The stream holds fewer point counts than the octree has leaves, skipping leaf.\n");
+          return;
+        }
+
+        pointCount = *point_count_data_vector_iterator_++;
+        const auto cloudSize = output_->size ();
+        output_->points.resize (cloudSize + pointCount);
+        for (std::size_t i = 0; i < pointCount; ++i)
+        {
+          if (!decodeLosslessPoint (output_->points[cloudSize + i]))
+            PCL_WARN ("[pcl::io::OctreePointCloudCompression::deserializeTreeCallback] Not enough lossless point data left in the stream.\n");
+        }
+        return;
+      }
 
       if (!do_voxel_grid_enDecoding_)
       {
@@ -562,6 +786,172 @@ namespace pcl
           color_coder_.setDefaultColor (output_, output_->size () - pointCount,
                                        output_->size (), point_color_offset_);
       }
+
+      if (data_with_normals_)
+      {
+        if (do_voxel_grid_enDecoding_)
+        {
+          decodeNormal (output_->points[output_->size () - pointCount]);
+        }
+        else
+        {
+          const std::size_t begin = output_->size () - pointCount;
+          for (std::size_t i = 0; i < pointCount; ++i)
+            decodeNormal (output_->points[begin + i]);
+        }
+      }
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::analyzePointFields ()
+    {
+      point_fields_ = pcl::getFields<PointT> ();
+      cloud_with_color_ = false;
+      cloud_with_normals_ = false;
+      point_color_offset_ = 0;
+      normal_field_size_ = 0;
+      lossless_point_record_size_ = 0;
+
+      for (const auto& field : point_fields_)
+        lossless_point_record_size_ += static_cast<std::size_t> (pcl::getFieldSize (field.datatype)) * field.count;
+
+      int color_index = pcl::getFieldIndex<PointT> ("rgb", point_fields_);
+      if (color_index == -1)
+        color_index = pcl::getFieldIndex<PointT> ("rgba", point_fields_);
+      if (color_index >= 0)
+      {
+        const auto& color_field = point_fields_[color_index];
+        const auto color_size = static_cast<std::size_t> (pcl::getFieldSize (color_field.datatype)) * color_field.count;
+        if (color_size == sizeof (std::uint32_t))
+        {
+          point_color_offset_ = static_cast<unsigned char> (color_field.offset);
+          cloud_with_color_ = true;
+        }
+      }
+
+      const char* normal_names[3] = {"normal_x", "normal_y", "normal_z"};
+      bool has_normals = true;
+      for (int component = 0; component < 3; ++component)
+      {
+        const int normal_index = pcl::getFieldIndex<PointT> (normal_names[component], point_fields_);
+        if (normal_index < 0)
+        {
+          has_normals = false;
+          break;
+        }
+
+        const auto& normal_field = point_fields_[normal_index];
+        const auto normal_size = static_cast<std::size_t> (pcl::getFieldSize (normal_field.datatype)) * normal_field.count;
+        if (normal_field.datatype != pcl::PCLPointField::FLOAT32 || normal_size != sizeof (float))
+        {
+          has_normals = false;
+          break;
+        }
+        normal_offsets_[component] = static_cast<unsigned char> (normal_field.offset);
+      }
+
+      cloud_with_normals_ = has_normals;
+      normal_field_size_ = has_normals ? static_cast<unsigned char> (sizeof (float)) : 0;
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::encodeLosslessPoint (const PointT& point_arg)
+    {
+      const char* point_data = reinterpret_cast<const char*> (&point_arg);
+      for (const auto& field : point_fields_)
+      {
+        const auto field_size = static_cast<std::size_t> (pcl::getFieldSize (field.datatype)) * field.count;
+        lossless_point_data_vector_.insert (lossless_point_data_vector_.end (),
+                                            point_data + field.offset,
+                                            point_data + field.offset + field_size);
+      }
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> bool
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::decodeLosslessPoint (PointT& point_arg)
+    {
+      char* point_data = reinterpret_cast<char*> (&point_arg);
+      for (const auto& field : point_fields_)
+      {
+        const auto field_size = static_cast<std::size_t> (pcl::getFieldSize (field.datatype)) * field.count;
+        if (lossless_point_data_position_ + field_size > lossless_point_data_vector_.size ())
+          return false;
+
+        std::memcpy (point_data + field.offset,
+                     lossless_point_data_vector_.data () + lossless_point_data_position_,
+                     field_size);
+        lossless_point_data_position_ += field_size;
+      }
+      return true;
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::encodeNormal (const PointT& point_arg)
+    {
+      const char* point_data = reinterpret_cast<const char*> (&point_arg);
+      for (int component = 0; component < 3; ++component)
+      {
+        normal_data_vector_.insert (normal_data_vector_.end (),
+                                    point_data + normal_offsets_[component],
+                                    point_data + normal_offsets_[component] + normal_field_size_);
+      }
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> bool
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::decodeNormal (PointT& point_arg)
+    {
+      constexpr std::size_t normal_size = 3 * sizeof (float);
+      if (normal_data_position_ + normal_size > normal_data_vector_.size ())
+      {
+        PCL_WARN ("[pcl::io::OctreePointCloudCompression::decodeNormal] Not enough normal data left in the stream, skipping normals.\n");
+        return false;
+      }
+
+      if (cloud_with_normals_)
+      {
+        char* point_data = reinterpret_cast<char*> (&point_arg);
+        for (int component = 0; component < 3; ++component)
+        {
+          std::memcpy (point_data + normal_offsets_[component],
+                       normal_data_vector_.data () + normal_data_position_ + component * sizeof (float),
+                       sizeof (float));
+        }
+      }
+      normal_data_position_ += normal_size;
+      return true;
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+    template<typename PointT, typename LeafT, typename BranchT, typename OctreeT> void
+    OctreePointCloudCompression<PointT, LeafT, BranchT, OctreeT>::restoreOriginalPointOrder ()
+    {
+      if (point_index_data_vector_.size () != output_->size ())
+      {
+        PCL_WARN ("[pcl::io::OctreePointCloudCompression::restoreOriginalPointOrder] Point index count does not match decoded cloud size.\n");
+        return;
+      }
+
+      PointCloud ordered_cloud;
+      ordered_cloud.points.resize (output_->size ());
+      std::vector<bool> seen (output_->size (), false);
+      for (std::size_t i = 0; i < output_->size (); ++i)
+      {
+        const auto index = point_index_data_vector_[i];
+        if (index >= output_->size () || seen[index])
+        {
+          PCL_WARN ("[pcl::io::OctreePointCloudCompression::restoreOriginalPointOrder] Invalid point index in stream.\n");
+          return;
+        }
+        ordered_cloud.points[index] = output_->points[i];
+        seen[index] = true;
+      }
+
+      output_->points.swap (ordered_cloud.points);
     }
   }
 }

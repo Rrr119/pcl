@@ -47,7 +47,13 @@
 
 template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZ>;
 template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZRGB>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBL>;
 template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBA>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointNormal>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZRGBNormal>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZINormal>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointXYZLNormal>;
+template class PCL_EXPORTS pcl::io::OctreePointCloudCompression<pcl::PointSurfel>;
 
 #ifdef HAVE_PNG
 #ifdef HAVE_OPENNI
